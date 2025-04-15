@@ -1,896 +1,980 @@
-#include<iostream>
-#include<fstream>
-#include<cstring>
-#include<windows.h>
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#include <queue>
+#include <map>
+#include <vector>
+#include <iomanip>
+#include <algorithm>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
+
 using namespace std;
 
-const char adminFile[]="admin.txt";
-const char userFile[]="users.txt";
-const char ordersFile[]="orders.txt";
-const char productsFile[]="products.txt";
+// UI Framework - Cross-platform compatible
 
-// Structure to represent a product
-struct Product{
+namespace UI {
+    // Formatting
+    const string RESET = "\033[0m";
+    const string BOLD = "\033[1m";
+    const string DIM = "\033[2m";
+    
+    // Colors
+    const string RED = "\033[31m";
+    const string GREEN = "\033[32m";
+    const string YELLOW = "\033[33m";
+    const string BLUE = "\033[34m";
+    const string MAGENTA = "\033[35m";
+    const string CYAN = "\033[36m";
+    
+    void printSuccess(const string& message) {
+        cout << GREEN << BOLD << "[+] " << message << RESET << endl;
+    }
+    
+    void printError(const string& message) {
+        cout << RED << BOLD << "[-] " << message << RESET << endl;
+    }
+    
+    void printWarning(const string& message) {
+        cout << YELLOW << BOLD << "[!] " << message << RESET << endl;
+    }
+    
+    void printInfo(const string& message) {
+        cout << CYAN << BOLD << "[i] " << message << RESET << endl;
+    }
+    
+    void drawHorizontalLine(int width = 50) {
+        cout << "+" << string(width, '-') << "+" << endl;
+    }
+    
+    void clearScreen() {
+        cout << "\033[2J\033[1;1H";  // ANSI escape codes for clear screen
+    }
+    
+    void sleepMilliseconds(int ms) {
+        #ifdef _WIN32
+            Sleep(ms);
+        #else
+            usleep(ms * 1000);
+        #endif
+    }
+    
+    void showLoadingAnimation(int seconds = 2) {
+        cout << BLUE << BOLD << "Loading ";
+        for (int i = 0; i < seconds * 2; i++) {
+            cout << ">";
+            cout.flush();
+            sleepMilliseconds(500);
+        }
+        cout << RESET << endl;
+    }
+}
+
+
+// Data Structures
+
+const char adminFile[] = "data/admin.txt";
+const char userFile[] = "data/users.txt";
+const char ordersFile[] = "data/orders.txt";
+const char productsFile[] = "data/products.txt";
+
+struct Product {
+    int id;
     char name[50];
     float price;
     int quantity;
+    Product* next;
 };
 
-// Structure to represent a user
-struct User{
+struct User {
     char username[50];
     char password[50];
     char email[50];
 };
 
-// Structure to represent an order
-struct Order{
+struct Order {
     char username[50];
     char productName[50];
     int quantity;
     float totalAmount;
     char status[20];
+    int priority;
+    
+    bool operator<(const Order& other) const {
+        return priority < other.priority;
+    }
 };
 
-// Function declarations
+struct CartItem {
+    char productName[50];
+    float price;
+    int quantity;
+};
+
+
+// Global Variables
+
+priority_queue<Order> orderQueue;
+Product* productHead = NULL;
+map<string, User> userMap;
+float siteBalance = 0.0f;
+vector<CartItem> currentCart;
+int nextProductId = 1;
+
+
+// Utility Functions
+
+bool fileExists(const char* fileName) {
+    ifstream file(fileName);
+    return file.good();
+}
+
+bool containsAlphabet(const string& str) {
+    for (char c : str) {
+        if (isalpha(c)) return true;
+    }
+    return false;
+}
+
+bool containsDigits(const string& str) {
+    for (char c : str) {
+        if (isdigit(c)) return true;
+    }
+    return false;
+}
+
+bool emailValid(const string& email) {
+    return email.find('@') != string::npos && 
+           email.find('.') != string::npos;
+}
+
+string getInput(const string& prompt, bool (*validator)(const string&) = nullptr, 
+               const string& errorMsg = "Invalid input!") {
+    string input;
+    while (true) {
+        cout << UI::BOLD << prompt << UI::RESET;
+        getline(cin, input);
+        
+        if (validator == nullptr || validator(input)) {
+            return input;
+        }
+        UI::printError(errorMsg);
+    }
+}
+
+void ensureDataDirectoryExists() {
+    #ifdef _WIN32
+    _mkdir("data");
+    #else
+    mkdir("data", 0777);
+    #endif
+}
+
+
+// Data Management
+
+void loadUsers() {
+    ifstream in(userFile);
+    if (!in) return;
+    
+    User user;
+    while (in >> user.username >> user.password >> user.email) {
+        userMap[user.username] = user;
+    }
+}
+
+void saveUsers() {
+    ofstream out(userFile);
+    if (!out) {
+        UI::printError("Error saving users!");
+        return;
+    }
+    
+    for (const auto& pair : userMap) {
+        out << pair.second.username << '\t' 
+            << pair.second.password << '\t' 
+            << pair.second.email << '\n';
+    }
+}
+
+void addProductToLinkedList(const Product& product) {
+    Product* newProduct = new Product;
+    newProduct->id = product.id;
+    strcpy(newProduct->name, product.name);
+    newProduct->price = product.price;
+    newProduct->quantity = product.quantity;
+    newProduct->next = NULL;
+
+    if (productHead == NULL) {
+        productHead = newProduct;
+    } else {
+        Product* current = productHead;
+        while (current->next != NULL) {
+            current = current->next;
+        }
+        current->next = newProduct;
+    }
+    
+    if (product.id >= nextProductId) {
+        nextProductId = product.id + 1;
+    }
+}
+
+void loadProducts() {
+    ifstream in(productsFile);
+    if (!in) return;
+    
+    // Clear existing list
+    Product* current = productHead;
+    while (current != NULL) {
+        Product* temp = current;
+        current = current->next;
+        delete temp;
+    }
+    productHead = NULL;
+
+    Product temp;
+    while (in >> temp.id >> temp.name >> temp.price >> temp.quantity) {
+        addProductToLinkedList(temp);
+    }
+}
+
+void saveProducts() {
+    ofstream out(productsFile);
+    if (!out) {
+        UI::printError("Error saving products!");
+        return;
+    }
+    
+    Product* current = productHead;
+    while (current != NULL) {
+        out << current->id << '\t' 
+            << current->name << '\t' 
+            << current->price << '\t' 
+            << current->quantity << '\n';
+        current = current->next;
+    }
+}
+
+void loadOrders() {
+    ifstream in(ordersFile);
+    if (!in) return;
+    
+    Order order;
+    while (in >> order.username >> order.productName 
+           >> order.quantity >> order.totalAmount
+           >> order.status >> order.priority) {
+        orderQueue.push(order);
+        if (strcmp(order.status, "Delivered") == 0) {
+            siteBalance += order.totalAmount;
+        }
+    }
+}
+
+void saveOrders() {
+    ofstream out(ordersFile);
+    if (!out) {
+        UI::printError("Error saving orders!");
+        return;
+    }
+    
+    // Temporary vector to hold orders
+    vector<Order> orders;
+    while (!orderQueue.empty()) {
+        orders.push_back(orderQueue.top());
+        orderQueue.pop();
+    }
+    
+    // Write to file
+    for (const Order& order : orders) {
+        out << order.username << '\t' << order.productName << '\t'
+           << order.quantity << '\t' << order.totalAmount << '\t'
+           << order.status << '\t' << order.priority << '\n';
+        orderQueue.push(order); // Restore queue
+    }
+}
+
+
+// UI Components
+
+void displayMenu(const vector<string>& options, const string& title = "MENU") {
+    int width = 40;
+    cout << "+" << string(width, '-') << "+" << endl;
+    cout << "|" << UI::BOLD << setw(width) << left << ("  " + title) << UI::RESET << "|" << endl;
+    cout << "+" << string(width, '-') << "+" << endl;
+    
+    for (size_t i = 0; i < options.size(); i++) {
+        cout << "| " << UI::BOLD << setw(2) << left << (to_string(i+1) + ".") 
+             << UI::RESET << setw(width-3) << options[i] << "|" << endl;
+    }
+    
+    cout << "+" << string(width, '-') << "+" << endl;
+    cout << UI::BOLD << "Enter your choice: " << UI::RESET;
+}
+
+void displayProductTable() {
+    if (productHead == NULL) {
+        UI::printWarning("No products available!");
+        return;
+    }
+
+    // Header
+    cout << "+------+----------------------+-----------+-----------+" << endl;
+    cout << "| " << left << setw(4) << "ID" << " | " 
+         << setw(20) << "Name" << " | " 
+         << setw(9) << "Price" << " | " 
+         << setw(9) << "Quantity" << " |" << endl;
+    cout << "+------+----------------------+-----------+-----------+" << endl;
+    
+    // Products
+    Product* current = productHead;
+    while (current != NULL) {
+        cout << "| " << UI::BOLD << setw(4) << current->id << UI::RESET << " | " 
+             << setw(20) << current->name << " | " 
+             << setw(9) << "$" + to_string(current->price).substr(0, 5) << " | " 
+             << setw(9) << current->quantity << " |" << endl;
+        current = current->next;
+    }
+    
+    // Footer
+    cout << "+------+----------------------+-----------+-----------+" << endl;
+}
+
+void displayCart() {
+    if (currentCart.empty()) {
+        UI::printWarning("Your cart is empty!");
+        return;
+    }
+
+    float total = 0.0f;
+    
+    cout << UI::YELLOW << UI::BOLD << "Your Shopping Cart" << UI::RESET << endl;
+    cout << "+------------------------+-------+-----------+" << endl;
+    cout << "| " << left << setw(24) << "Product" 
+         << "| " << setw(5) << "Qty" 
+         << "| " << setw(9) << "Subtotal" << "|" << endl;
+    cout << "+------------------------+-------+-----------+" << endl;
+    
+    for (const auto& item : currentCart) {
+        float subtotal = item.price * item.quantity;
+        cout << "| " << left << setw(24) << item.productName 
+             << "| " << setw(5) << item.quantity 
+             << "| " << setw(9) << "$" + to_string(subtotal).substr(0, 6) 
+             << "|" << endl;
+        total += subtotal;
+    }
+    
+    cout << "+------------------------+-------+-----------+" << endl;
+    cout << "| " << left << setw(31) << "Total:" 
+         << " $" << setw(6) << total << "|" << endl;
+    cout << "+------------------------+-------+-----------+" << endl;
+}
+
+
+// Core Functions
+
 void adminLogin();
 void userLogin();
 void userRegistration();
-void displayProducts();
-void addToCart(const char* username);
-void removeFromCart(const char* username);
-void viewCart(const char* username);
-void makePurchase(const char* username);
-void viewHistory(const char* username);
 void adminMenu();
-void siteBalance();
-void adminWithdrawal();
-void adminDeposit();
-void changeAdminPassword();
-void viewAllOrders();
-void markOrderDelivered();
-void loadProducts(Product products[], int& productCount);
-void saveProducts(const Product products[], int productCount);
-void userMenu(const char* username);
+void userMenu(const string& username);
+void addProduct();
+void processOrder(const string& username);
 
-bool fileExists(const char* fileName);
-bool fileExist(const string& fileName);
-bool containsAlphabet(const char* str);
-bool containsDigits(const char* str);
-bool emailValid(const char* str);
-int main(){
-	
-	system("color A");
-	
-    if (!fileExists(adminFile)) {
-        ofstream adminStream(adminFile);
-        adminStream.close();
+
+// Main Application
+
+int main() {
+    ensureDataDirectoryExists();
+    
+    // Initialize required files
+    const char* files[] = {adminFile, userFile, ordersFile, productsFile};
+    for (const char* file : files) {
+        if (!fileExists(file)) {
+            ofstream out(file);
+            if (strcmp(file, adminFile) == 0) {
+                out << "admin123\n"; // Default admin password
+            }
+            out.close();
+        }
     }
-    if (!fileExists(userFile)) {
-        ofstream userStream(userFile);
-        userStream.close();
-    }
-    if (!fileExists(ordersFile)) {
-        ofstream ordersStream(ordersFile);
-        ordersStream.close();
-    }
-    if (!fileExists(productsFile)) {
-        ofstream productsStream(productsFile);
-        productsStream.close();
-    }
+
+    // Load data
+    loadUsers();
+    loadProducts();
+    loadOrders();
+
+    UI::clearScreen();
+    cout << UI::MAGENTA << UI::BOLD << "=== E-Commerce System ===" << UI::RESET << endl << endl;
+
     int choice;
-    do{
-    	system("color A");
-		system("cls");
-        cout<<"\n\n\n";
-        cout<<"\t 1. Admin login"<<endl;
-        cout<<"\t 2. User Login"<<endl;
-        cout<<"\t 3. User Registeration"<<endl;
-        cout<<"\t 4. Exit"<<endl;
-        cout<<"\t ";
+    do {
+        vector<string> mainMenu = {
+            "Admin Login",
+            "User Login",
+            "User Registration",
+            "Exit"
+        };
+        
+        displayMenu(mainMenu, "MAIN MENU");
         cin >> choice;
-        switch (choice){
-            case 1:
-                adminLogin();
+        cin.ignore();
+        
+        switch (choice) {
+            case 1: adminLogin(); break;
+            case 2: userLogin(); break;
+            case 3: userRegistration(); break;
+            case 4: 
+                cout << "\nExiting...\n";
                 break;
-	            case 2:
-	                userLogin();
-	                break;
-		            case 3:
-		                userRegistration();
-		                break;
-		                case 4:
-		                	exit(0);
-		                	break;
-				            default:
-				                cout<<"\t Enter the valid input"<<endl;
-				                break;
+            default:
+                UI::printError("Invalid choice!");
+                UI::sleepMilliseconds(1000);
         }
     } while (choice != 4);
+
+    // Cleanup
+    Product* current = productHead;
+    while (current != NULL) {
+        Product* temp = current;
+        current = current->next;
+        delete temp;
+    }
 
     return 0;
 }
 
-bool containsAlphabet(const char* str){
-	while(*str){
-		if(isalpha(*str))
-		return true;
-		str++;
-		
-	}
-	return false;
-}
-bool containsDigits(const char* str){
-	while(*str){
-		if(isdigit(*str))
-		return true;
-		str++;
-		
-	}
-	return false;
-}
-bool fileExist(const string& fileName){
-	ifstream file(fileName);
-	return file.good();
-}
-bool emailValid(const char* str){
-	return (strstr(str,"@gmail.com")!=nullptr);
-} 
-
-void adminLogin(){
-	system("cls");
-	cout<<"\n\n\n";
-    ifstream adminLogin(adminFile);
-    if (!adminLogin.is_open()) {
-        cout<<"\t Error opening file...."<<endl;
+void adminLogin() {
+    UI::clearScreen();
+    ifstream in(adminFile);
+    if (!in) {
+        UI::printError("Error opening admin file!");
         return;
     }
-    char enteredPassword[10];
-    char storedPassword[10];
-    
-    adminLogin >> storedPassword;
 
-    cout<<"\t Enter admin password : ";
-    cin>>enteredPassword;
-    cout<<endl;
-    if (strcmp(enteredPassword, storedPassword) == 0){
-    	system("cls");
-	    cout<<"\n";
-	    cout<<"\n\n\n\t\t\t\t\t\tloading"<<endl;
-	    char loading=219;
-	    cout<<"\t\t\t\t";
-	    for(int i=0;i<=40;i++){
-	   		cout<<loading;
-	       	Sleep(10);
-		}
+    string storedPassword;
+    in >> storedPassword;
+    in.close();
+
+    string enteredPassword = getInput("Enter admin password: ");
+
+    if (enteredPassword == storedPassword) {
+        UI::showLoadingAnimation(2);
+        UI::printSuccess("Login successful!");
+        UI::sleepMilliseconds(1000);
         adminMenu();
-    }
-	else{
-		system("cls");
-	    cout<<"\n";
-	    cout<<"\n\n\n\t\t\t\t\t\tloading"<<endl<<endl;
-	    char loading=219;
-	    cout<<"\t\t\t\t";
-	    for(int i=0;i<=40;i++){
-	   		cout<<loading;
-	       	Sleep(50);
-		}
-        system("color C");
-        cout<<"\n\n";
-        cout<<"\t Incorrect password / Try Again"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-    adminLogin.close();
-}
-
-void userRegistration(){
-	system("cls");
-	cout<<endl;
-	cout<<"\t \t\t Press 0 for return to main"<<endl;
-	cout<<"\n\n";
-	
-	string username;
-    User newUser;
-    ofstream userLogin;
-    start1:
-    cout<<"\t Enter username : ";
-    cin>>username;
-    if(username == "0"){
-    	main();
-	}
-    cout<<endl;
-    if(fileExist(username+".txt")){
-    	cout<<"\t User already exists"<<endl<<endl;
-    	cout<<"\t ";
-    	system("pause");
-    	goto start1;
-	}
-    if(username.find(' ')!=string::npos){
-    	cout<<"\t Spaces are not allowed "<<endl;
-    	main();
-	}
-	start2:
-	cin.ignore();
-    cout<<"\t Enter password : ";
-    cin>>newUser.password;
-    if(newUser.password[0] == '0'){
-    	main();
-	}
-	else{
-		cout<<endl;
-	    if(!containsAlphabet(newUser.password)){
-	    	cout<<"\t Password must contains at least one alphabet "<<endl;
-	    	cout<<endl;
-	    	cout<<"\t ";
-	    	system("pause");
-	    	goto start2;
-		}
-		if(!containsDigits(newUser.password)){
-	    	cout<<"\t Password must contains at least one digit "<<endl;
-	    	cout<<endl;
-	    	cout<<"\t ";
-	    	system("pause");
-	    	goto start2;
-		}
-	}
-    
-	start3:
-	cin.ignore();
-    cout<<"\t Enter your email : ";
-    cin>>newUser.email;
-    if(newUser.email[0] == '0'){
-    	main();
-	}
-	else{
-		cout<<endl;
-		if(!emailValid(newUser.email)){
-			cout<<"\t Email format is incorrect"<<endl;
-	    	cout<<endl;
-	    	cout<<"\t ";
-	    	system("pause");
-	    	goto start3;
-		}
-	}
-    
-    userLogin.open(username+".txt");
-    if (!userLogin.is_open()) {
-        cout<<"\t Error opening file...."<<endl;
-        return;
-    }
-    userLogin<<username<<endl;
-	userLogin<<newUser.password<<endl;
-	userLogin<<newUser.email<<endl;
-    userLogin.close();
-    system("cls");
-	cout<<"\n";
-	cout<<"\n\n\n\t\t\t\t\t\tloading"<<endl;
-	char loading=219;
-	cout<<"\t\t\t\t";
-	for(int i=0;i<=40;i++){
-	   	cout<<loading;
-	    Sleep(50);
-	}
-	cout<<"\n\n";
-
-    cout<<"\t User register successful..."<<endl;
-    cout<<endl;
-    cout<<"\t ";
-    system("pause");
-    main();
-}
-
-void userLogin(){
-	system("cls");
-	system("color A");
-	cout<<"\n\n\n";
-    User user;
-    ifstream userFile;
-    string username;
-
-    cout<<"\t Enter username : ";
-    cin>>username;
-    if(username == "0"){
-    	main();
-	}
-    cout<<endl;
-    cout<<"\t Enter password : ";
-    cin>>user.password;
-    if(user.password[0] == '0'){
-    	main();
-	}
-    cout<<endl;
-    userFile.open(username + ".txt");
-
-    if (!userFile.is_open()) {
-    	system("color C");
-        cout<<"\t Error opening file / Try Again"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-    char storedPassword[10];
-    char email[50];
-    userFile>>user.username;
-	userFile>>storedPassword;
-	userFile>>email;
-    userFile.close();
-    if (strcmp(user.password, storedPassword) == 0){
-    	system("cls");
-	    cout<<"\n";
-	    cout<<"\n\n\n\t\t\t\t\t\tloading"<<endl;
-	    char loading=219;
-	    cout<<"\t\t\t\t";
-	    for(int i=0;i<=40;i++){
-	   		cout<<loading;
-	       	Sleep(10);
-		}
-        userMenu(user.username);
-    }
-	else{
-		system("cls");
-	    cout<<"\n";
-	    cout<<"\n\n\n\t\t\t\t\t\tloading"<<endl;
-	    char loading=219;
-	    cout<<"\t\t\t\t";
-	    for(int i=0;i<=40;i++){
-	   		cout<<loading;
-	       	Sleep(20);
-		}
-		cout<<"\n\n";
-        system("color C");
-        cout<<"\t Incorrect username / password / Try Again"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        main();
-    }
-}
-// Function to display products to the user
-void displayProducts(){
-	system("cls");
-	cout<<"\n\n\n";
-    Product products[100];
-    int productCount = 0;
-    loadProducts(products, productCount);
-    cout<<"\t\t Avaliable Products"<<endl;
-    cout<<"\t ----------------------------------------"<<endl;
-    cout<<"\t ID\tName\t\tPrice\tQuantity\n";
-    for(int i=0;i<productCount;++i){
-        cout<<"\t "<<i+1<<"\t"<<products[i].name<<"\t\t"<<products[i].price<<"\t"<<products[i].quantity<<endl;
-    }
-    cout<<"\t ----------------------------------------"<<endl<<endl;
-    cout<<"\t ";
-    system("pause");
-}
-
-void addToCart(const char* username){
-    Product products[100];
-    int productCount = 0;
-    int productID;
-    int quantity;
-    loadProducts(products, productCount);
-    displayProducts();
-    cout<<"\t Enter the product ID to add to cart : ";
-    cin>>productID;
-    cout<<endl;
-    if(productID>=1&&productID<=productCount){
-        cout<<"\t Enter the quantity : ";
-        cin>>quantity;
-        cout<<endl;
-        if(quantity>0&&quantity<=products[productID-1].quantity){
-            products[productID-1].quantity -=quantity;
-            saveProducts(products,productCount);
-    		string usernameStr(username);
-    		
-    		ofstream cartSystem((usernameStr+"_cart.txt").c_str(),ios::app);
-            if(!cartSystem.is_open()){
-            	system("color B");
-                cout<<"\t Error opening file"<<endl;
-                return;
-            }
-            cartSystem<<products[productID-1].name<<"\t"<<products[productID-1].price<<"\t"<<quantity<<endl;
-            cartSystem.close();
-            cout<<"\t Product added to cart successfully..."<<endl<<endl;
-            cout<<"\t ";
-            system("pause");
-        }
-		else{
-			system("color C");
-            cout<<"\t Invalid quantity...."<<endl<<endl;
-            cout<<"\t ";
-            system("pause");
-        }
-    }
-	else{
-        system("color C");
-        cout<<"\t Invalid product ID...."<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-    }
-}
-
-void removeFromCart(const char* username){
-	string usernameStr(username);
-    std::ifstream cartStream((usernameStr + "_cart.txt").c_str(), std::ios::app);
-    if (!cartStream.is_open()) {
-        std::cerr << "\t Error opening cart file.\n";
-        return;
-    }
-
-    Product products[100];
-    int productCount = 0;
-
-    // Load products from file
-    loadProducts(products, productCount);
-
-    displayProducts();
-
-    int productID;
-    int quantity;
-
-    cout << "\t Enter the product ID to remove from cart: ";
-    cin >> productID;
-
-    if (productID >= 1 && productID <= productCount) {
-        cout<<"\t Enter the quantity to remove: ";
-        cin >> quantity;
-        products[productID - 1].quantity += quantity;
-        saveProducts(products, productCount);
-        ofstream tempStream("temp.txt", std::ios::app);
-        char productName[50];
-        float price;
-
-        while (cartStream >> productName >> price >> quantity) {
-            if (strcmp(products[productID - 1].name, productName) == 0) {
-                continue;
-            }
-
-            tempStream << productName << "\t" << price << "\t" << quantity << "\n";
-        }
-
-        tempStream.close();
-        cartStream.close();
-         remove((std::string(username) + ".txt").c_str());
-    rename("temp.txt", (string(username) + ".txt").c_str());
-
-        cout << "\t Product removed from cart successfully.\n";
     } else {
-        cout << "\t Invalid product ID. Try again.\n";
+        UI::showLoadingAnimation(2);
+        UI::printError("Incorrect password!");
+        UI::sleepMilliseconds(1500);
     }
 }
 
-void viewCart(const char* username){
-	system("cls");
-	cout<<"\n\n\n";
-	string usernameStr(username);
-    ifstream cartDisplay((usernameStr+"_cart.txt").c_str(),ios::app);
-    if (!cartDisplay.is_open()) {
-    	system("color C");
-        cout<<"\t Error opening file"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-    cout<<"\t Your Cart : "<<endl;
-    cout<<"\t ----------------------------------------"<<endl;
-    cout<<"\t Name \t\t Price \t Quantity"<<endl;
-    char productName[50];
-    float price;
-    int quantity;
-    while(cartDisplay>>productName>>price>>quantity){
-        cout<<"\t "<<productName<<"\t\t"<<price<<"\t"<<quantity<<endl;
-    }
-    cartDisplay.close();
-    cout<<endl;
-    cout<<"\t ";
-    system("pause");
-}
-
-void makePurchase(const char* username){
-	system("cls");
-	cout<<"\n\n\n";
-	string usernameStr(username);
-    ifstream cartPurchase((usernameStr+"_cart.txt").c_str(),ios::app);
-    if(!cartPurchase.is_open()){
-        system("color C");
-        cout<<"\t Error opening cart file"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-    Order order;
-    order.totalAmount = 0;
-    strcpy(order.username, username);
-    strcpy(order.status, "Pending");
-
-    char productName[50];
-    float price;
-    int quantity;
-    while (cartPurchase>>productName>>price>>quantity){
-        strcpy(order.productName, productName);
-        order.quantity=quantity;
-        order.totalAmount+=price*quantity;
-        ofstream cartPurchase(ordersFile,ios::app);
-        cartPurchase<<order.username<<"\t"<<order.productName<<"\t"<<order.quantity<<"\t"<<order.totalAmount<<"\t"<<order.status<<endl;
-        cartPurchase.close();
-    }
-
-    cartPurchase.close();
-    remove((string(username)+"_cart.txt").c_str());
-    cout<<"\t Purchase successful..."<<endl;
-	cout<<"\t Total amount : "<<order.totalAmount<<endl<<endl;
-	cout<<"\t ";
-	system("pause");
-}
-
-void viewHistory(const char* username){
-	system("cls");
-	cout<<"\n\n\n";
-	string usernameStr(username);
-    ifstream historyView((usernameStr+"_history.txt").c_str(),ios::app);
-    if(!historyView.is_open()){
-        system("color C");
-        cout<<"\t Error opening history file"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-	else{
-		cout<<"\t Your Purchase History"<<endl;
-    	cout<<"\t ----------------------------------------"<<endl;
-		string line;
-		while(getline(historyView,line)){
-			cout<<"\t "<<line<<endl;
-		}
-		historyView.close();
-	}
-	cout<<"\t ";
-	system("pause");
-}
-
-void adminAddProduct(){
-	system("cls");
-	cout<<"\n\n\n";
-    Product newProduct;
-    cout<<"\t Enter the name of the new product : ";
-    cin.ignore();
-    cin.getline(newProduct.name,sizeof(newProduct.name));
-    cout<<endl;
-    cout<<"\t Enter the price of the new product : ";
-    cin>>newProduct.price;
-    cout<<endl;
-    cout<<"\t Enter the quantity of the new product : ";
-    cin>>newProduct.quantity;
-
-    Product products[100];
-    int productCount = 0;
-    loadProducts(products, productCount);
-    products[productCount++] = newProduct;
-    saveProducts(products, productCount);
-    cout<<endl;
-    cout<<"\t Product added successfully..."<<endl<<endl;
-    cout<<"\t ";
-    system("pause");
-}
-// Function to display the admin menu
-void adminMenu(){
-    int choice;
-    do {
-    	system("cls");
-    	cout<<"\n\n\n";
-    	system("color A");
-        cout<<"\t Admin Menu"<<endl;
-        cout<<"\t 1. Admin Balance"<<endl;
-		cout<<"\t 2. Admin Withdrawal"<<endl;
-        cout<<"\t 3. Change Admin Password"<<endl;
-		cout<<"\t 4. View All Orders"<<endl;
-        cout<<"\t 5. Mark Order Delivered"<<endl;
-        cout<<"\t 6. Add Products"<<endl;
-		cout<<"\t 7. Logout"<<endl;
-		cout<<"\t Choice : ";
-        cin>>choice;
-        switch(choice){
-            case 1:
-                siteBalance();
-                break;
-	            case 2:
-	                adminWithdrawal();
-	                break;
-		            case 3:
-		                changeAdminPassword();
-		                break;
-			            case 4:
-			                viewAllOrders();
-			                break;
-				            case 5:
-				                markOrderDelivered();
-				                break;
-					            case 6:
-					                adminAddProduct();
-					                break;
-						            case 7:
-						                cout<<"\t Logout"<<endl;
-						                break;
-									    default:
-									        cout<<"\t Enter valid input"<<endl;
-									        break;
-       	}
-    } while (choice != 7);
-}
-
-// Function to display the site balance
-void siteBalance() {
-	system("cls");
-	cout<<"\n\n\n";
-    float balance = 0;
-    ifstream ordersStream(ordersFile);
-    if(!ordersStream.is_open()){
-        system("color C");
-        cout<<"\t Error opening file"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-    char username[50];
-    char productName[50];
-    int quantity;
-    float totalAmount;
-    char status[20];
-    while(ordersStream>>username>>productName>>quantity>>totalAmount>>status){
-        if(strcmp(status,"Delivered")==0){
-            balance+=totalAmount;
-        }
-    }
-    ordersStream.close();
-    cout<<"\t Site Balance : "<<balance<<endl<<endl;
-    cout<<"\t ";
-    system("pause");
+void userRegistration() {
+    UI::clearScreen();
+    cout << UI::BOLD << "USER REGISTRATION\n" << UI::RESET;
+    UI::drawHorizontalLine(30);
     
+    User newUser;
+    
+    string username = getInput("Enter username: ", [](const string& s) {
+        return !s.empty() && userMap.find(s) == userMap.end();
+    }, "Username already exists or is invalid!");
+    strcpy(newUser.username, username.c_str());
+    
+    string password = getInput("Enter password: ", [](const string& s) {
+        return s.length() >= 6 && containsAlphabet(s) && containsDigits(s);
+    }, "Password must be at least 6 characters with both letters and numbers!");
+    strcpy(newUser.password, password.c_str());
+    
+    string email = getInput("Enter email: ", emailValid, "Invalid email format!");
+    strcpy(newUser.email, email.c_str());
+
+    userMap[newUser.username] = newUser;
+    saveUsers();
+
+    UI::showLoadingAnimation(2);
+    UI::printSuccess("Registration successful!");
+    UI::sleepMilliseconds(1500);
 }
 
-void adminWithdrawal(){
-	system("cls");
-	cout<<"\n\n\n";
-    float withdrawalAmount;
-    cout<<"\t Enter the withdrawal amount : ";
-    cin>>withdrawalAmount;
-    cout<<endl;
-    float currentBalance = 0;
-    ifstream orderSee(ordersFile);
-    if(!orderSee.is_open()){
-        system("color C");
-        cout<<"\t Error opening file"<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
+void userLogin() {
+    UI::clearScreen();
+    cout << UI::BOLD << "USER LOGIN\n" << UI::RESET;
+    UI::drawHorizontalLine(30);
+    
+    string username = getInput("Enter username: ");
+    string password = getInput("Enter password: ");
+
+    auto it = userMap.find(username);
+    if (it != userMap.end() && strcmp(it->second.password, password.c_str()) == 0) {
+        UI::showLoadingAnimation(2);
+        UI::printSuccess("Login successful!");
+        UI::sleepMilliseconds(1000);
+        userMenu(username);
+    } else {
+        UI::showLoadingAnimation(2);
+        UI::printError("Invalid username or password!");
+        UI::sleepMilliseconds(1500);
     }
-    char username[50];
-    char productName[50];
-    int quantity;
-    float totalAmount;
-    char status[20];
-    while(orderSee>>username>>productName>>quantity>>totalAmount>>status){
-        if(strcmp(status,"Delivered")==0){
-            currentBalance+=totalAmount;
+}
+
+void addProduct() {
+    UI::clearScreen();
+    cout << UI::BOLD << "ADD NEW PRODUCT\n" << UI::RESET;
+    UI::drawHorizontalLine(30);
+    
+    Product newProduct;
+    newProduct.id = nextProductId++;
+    
+    string name = getInput("Enter product name: ");
+    strcpy(newProduct.name, name.c_str());
+    
+    string priceStr = getInput("Enter product price: ", [](const string& s) {
+        try {
+            stof(s);
+            return true;
+        } catch (...) {
+            return false;
         }
-    }
-    orderSee.close();
-    if(withdrawalAmount>0&&withdrawalAmount<=currentBalance){
-        float newBalance=currentBalance-withdrawalAmount;
-        ofstream adminStream(adminFile);
-        adminStream<<newBalance<<endl;
-        adminStream.close();
-        cout<<"\t Withdrawal successful...."<<endl;
-		cout<<"\t Updated site balance : "<<newBalance<<endl<<endl;
-		cout<<"\t ";
-		system("pause");
-    }
-	else{
-        system("color C");
-        cout<<"\t Invalid Withdrawal amount..."<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-}
-
-void changeAdminPassword(){
-	system("cls");
-	cout<<"\n\n\n";
-    char newPassword[50];
-    cout<<"\t Enter the new admin password : ";
-    cin>>newPassword;
-    cout<<endl;
-    ofstream adminPanel(adminFile);
-    adminPanel<<newPassword<<endl;
-    adminPanel.close();
-    cout<<"\t Admin password updated successfully..."<<endl<<endl;
-    cout<<"\t ";
-    system("pause");
-}
-
-void viewAllOrders(){
-	system("cls");
-	cout<<"\n\n\n";
-    ifstream orderSee(ordersFile);
-    if(!orderSee.is_open()){
-        system("color C");
-        cout<<"\t Error opening file..."<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-    cout<<"\t\t All Orders"<<endl;
-    cout<<"\t ---------------------------------------------------------------------------------------"<<endl;
-    cout<<"\t Username \t Name \t\t Quantity \tTotal Amount \t Status"<<endl;
-    char username[50];
-    char productName[50];
-    int quantity;
-    float totalAmount;
-    char status[20];
-    while(orderSee>>username>>productName>>quantity>>totalAmount>>status){
-        cout<<"\t "<<username<<"\t\t"<<productName<<"\t\t"<<quantity<<"\t\t"<<totalAmount<<"\t\t"<<status<<endl;
-    }
-    cout<<"\t ---------------------------------------------------------------------------------------"<<endl;
-    orderSee.close();
-    cout<<endl;
-    cout<<"\t ";
-    system("pause");
-}
-
-void markOrderDelivered(){
-	system("cls");
-	cout<<"\n\n\n";
-    ifstream orderDelivered(ordersFile);
-    if(!orderDelivered.is_open()){
-        system("color C");
-        cout<<"\t Error opening order file..."<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
-        return;
-    }
-    cout<<"\t Pending Orders"<<endl;
-    cout<<"\t ----------------------------------------"<<endl;
-    cout<<"\t Username\tName\t\tQuantity\tTotal Amount\tStatus"<<endl;
-    char username[50];
-    char productName[50];
-    int quantity;
-    float totalAmount;
-    char status[20];
-    bool foundPendingOrder = false;
-    while(orderDelivered>>username>>productName>>quantity>>totalAmount>>status){
-        if(strcmp(status,"Pending")==0){
-            foundPendingOrder=true;
-            cout<<"\t "<<username<<"\t\t"<<productName<<"\t\t"<<quantity<<"\t\t"<<totalAmount<<"\t\t"<<status<<endl;
+    }, "Invalid price! Enter a number.");
+    newProduct.price = stof(priceStr);
+    
+    string quantityStr = getInput("Enter product quantity: ", [](const string& s) {
+        try {
+            stoi(s);
+            return true;
+        } catch (...) {
+            return false;
         }
-    }
-    cout<<"\t ----------------------------------------"<<endl;
-    orderDelivered.close();
-    if(!foundPendingOrder){
-        system("color C");
-        cout<<"\t No pending orders to mark as delivered..."<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
+    }, "Invalid quantity! Enter a whole number.");
+    newProduct.quantity = stoi(quantityStr);
+    
+    addProductToLinkedList(newProduct);
+    saveProducts();
+    
+    UI::showLoadingAnimation(2);
+    UI::printSuccess("Product added successfully!");
+    UI::sleepMilliseconds(1500);
+}
+
+void addToCart(const string& username) {
+    displayProductTable();
+    if (productHead == NULL) {
+        UI::sleepMilliseconds(1500);
         return;
     }
-    string usernameToMark;
-    cout<<"\t Enter the username to mark the order as delivered : ";
-    cin>>usernameToMark;
-    cout<<endl;
-    ifstream ordersStream2(ordersFile);
-    ofstream tempStream("temp.txt",ios::app);
-    while(ordersStream2>>username>>productName>>quantity>>totalAmount>>status){
-        if(strcmp(username,usernameToMark.c_str())==0&&strcmp(status,"Pending")==0){
-            cout<<"\t Order marked as delivered for user : "<<username<<endl;
-            tempStream<<username<<"\t"<<productName<<"\t"<<quantity<<"\t"<<totalAmount<<"\tDelivered"<<endl;
-            ofstream ordersStream3((string(username)+"_history.txt"),ios::app);
-            ordersStream3<<"\t Product : "<<productName<<endl;
-			ordersStream3<<"\t Quantity : "<<quantity<<endl;
-			ordersStream3<<"\t Amount : "<<totalAmount<<endl;
-            ordersStream3.close();
+
+    string productIdStr = getInput("Enter product ID to add to cart (0 to cancel): ", [](const string& s) {
+        try {
+            stoi(s);
+            return true;
+        } catch (...) {
+            return false;
         }
-		else{
-            tempStream<<username<<"\t"<<productName<<"\t"<<quantity<<"\t"<<totalAmount<<"\t"<<status<<endl;
+    }, "Invalid ID! Enter a number.");
+    
+    int productId = stoi(productIdStr);
+    if (productId == 0) return;
+
+    // Find product
+    Product* current = productHead;
+    while (current != NULL && current->id != productId) {
+        current = current->next;
+    }
+
+    if (current == NULL) {
+        UI::printError("Product not found!");
+        UI::sleepMilliseconds(1500);
+        return;
+    }
+
+    string quantityStr = getInput("Enter quantity: ", [](const string& s) {
+        try {
+            int q = stoi(s);
+            return q > 0;
+        } catch (...) {
+            return false;
         }
-    }
-    tempStream.close();
-    ordersStream2.close();
-    remove(ordersFile);
-    rename("temp.txt", ordersFile);
-    cout<<"\t ";
-    system("pause");
-}
-
-void loadProducts(Product products[], int& productCount){
-    ifstream productsee(productsFile);
-    if (!productsee.is_open()) {
-        system("color C");
-        cout<<"\t Error opening file..."<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
+    }, "Invalid quantity! Enter a positive number.");
+    
+    int quantity = stoi(quantityStr);
+    
+    if (quantity > current->quantity) {
+        UI::printError("Not enough stock available!");
+        UI::sleepMilliseconds(1500);
         return;
     }
-    productCount = 0;
-    while(productsee>>products[productCount].name>>products[productCount].price>>products[productCount].quantity){
-        ++productCount;
-    }
-    productsee.close();
+
+    // Add to cart
+    CartItem item;
+    strcpy(item.productName, current->name);
+    item.price = current->price;
+    item.quantity = quantity;
+    currentCart.push_back(item);
+
+    // Update product quantity
+    current->quantity -= quantity;
+    saveProducts();
+
+    UI::printSuccess("Product added to cart!");
+    UI::sleepMilliseconds(1500);
 }
 
-void saveProducts(const Product products[],int productCount){
-    ofstream productSave(productsFile);
-    if(!productSave.is_open()){
-        system("color C");
-        cout<<"\t Error opening file..."<<endl<<endl;
-        cout<<"\t ";
-        system("pause");
+void checkout(const string& username) {
+    if (currentCart.empty()) {
+        UI::printWarning("Your cart is empty!");
+        UI::sleepMilliseconds(1500);
         return;
     }
-    for(int i=0;i<productCount;++i){
-        productSave<<products[i].name<<"\t"<<products[i].price<<"\t"<<products[i].quantity<<endl;;
+
+    displayCart();
+    cout << "\nConfirm checkout? (y/n): ";
+    char confirm;
+    cin >> confirm;
+    cin.ignore();
+    
+    if (tolower(confirm) != 'y') {
+        UI::printInfo("Checkout cancelled.");
+        UI::sleepMilliseconds(1500);
+        return;
     }
-    productSave.close();
+
+    // Create orders
+    float totalAmount = 0.0f;
+    for (const auto& item : currentCart) {
+        Order order;
+        strcpy(order.username, username.c_str());
+        strcpy(order.productName, item.productName);
+        order.quantity = item.quantity;
+        order.totalAmount = item.price * item.quantity;
+        strcpy(order.status, "Pending");
+        order.priority = (username.find("premium") != string::npos) ? 2 : 1;
+        
+        orderQueue.push(order);
+        totalAmount += order.totalAmount;
+    }
+
+    saveOrders();
+    currentCart.clear();
+
+    UI::showLoadingAnimation(3);
+    UI::printSuccess("Checkout successful! Total: $" + to_string(totalAmount).substr(0, 6));
+    UI::sleepMilliseconds(2000);
 }
 
-bool fileExists(const char* fileName){
-    ifstream file(fileName);
-    return file.good();
+void viewOrderHistory(const string& username) {
+    UI::clearScreen();
+    cout << UI::BOLD << "ORDER HISTORY FOR " << username << "\n" << UI::RESET;
+    UI::drawHorizontalLine(50);
+    
+    bool found = false;
+    vector<Order> orders;
+    
+    while (!orderQueue.empty()) {
+        orders.push_back(orderQueue.top());
+        orderQueue.pop();
+    }
+    
+    for (const Order& order : orders) {
+        if (string(order.username) == username && string(order.status) == "Delivered") {
+            found = true;
+            cout << "Product: " << order.productName << endl;
+            cout << "Quantity: " << order.quantity << endl;
+            cout << "Amount: $" << order.totalAmount << endl;
+            cout << "Status: " << order.status << endl;
+            UI::drawHorizontalLine(50);
+        }
+        orderQueue.push(order);
+    }
+    
+    if (!found) {
+        UI::printWarning("No order history found!");
+    }
+    
+    cout << "Press Enter to continue...";
+    cin.ignore();
+    cin.get();
 }
-// Function for the user menu
-void userMenu(const char* username){
+
+void adminMenu() {
     int choice;
     do {
-    	system("color A");
-    	system("cls");
-    	cout<<"\n\n\n";
-        cout<<"\t User Menu"<<endl;
-        cout<<"\t 1. Display Products"<<endl;
-		cout<<"\t 2. Add to Cart"<<endl;
-		cout<<"\t 3. Remove from Cart"<<endl;
-        cout<<"\t 4. View Cart"<<endl;
-		cout<<"\t 5. Make Purchase"<<endl;
-		cout<<"\t 6. View History"<<endl;
-		cout<<"\t 7. Logout"<<endl;
-		cout<<"\t Choice : ";
-        cin>>choice;
-        switch(choice){
-            case 1:
-                displayProducts();
+        UI::clearScreen();
+        vector<string> options = {
+            "View Site Balance",
+            "Withdraw Funds",
+            "Add Funds",
+            "Change Password",
+            "View All Orders",
+            "Mark Order as Delivered",
+            "Add Product",
+            "Logout"
+        };
+        displayMenu(options, "ADMIN DASHBOARD");
+        
+        cin >> choice;
+        cin.ignore();
+        
+        switch (choice) {
+            case 1: {
+                UI::clearScreen();
+                cout << UI::BOLD << "SITE BALANCE\n" << UI::RESET;
+                UI::drawHorizontalLine(20);
+                cout << "Current balance: $" << siteBalance << "\n";
+                cout << "Press Enter to continue...";
+                cin.ignore();
                 break;
-	            case 2:
-	                addToCart(username);
-	                break;
-		            case 3:
-		                removeFromCart(username);
-		                break;
-			            case 4:
-			                viewCart(username);
-			                break;
-				            case 5:
-				                makePurchase(username);
-				                break;
-					            case 6:
-					                viewHistory(username);
-					                break;
-						            case 7:
-						            	{
-						            	system("cls");
-									    cout<<"\n";
-									    cout<<"\n\n\n\t\t\t\t\t\tloading"<<endl;
-									    char loading=219;
-									    cout<<"\t\t\t\t";
-									    for(int i=0;i<=40;i++){
-									   		cout<<loading;
-									       	Sleep(50);
-										}
-										cout<<"\n\n";
-						                cout<<"\t Logout"<<endl;
-						                break;
-						            }
-							            default:
-							                cout<<"\t Enter valid input "<<endl;
-							                break;
+            }
+            case 2: {
+                UI::clearScreen();
+                cout << UI::BOLD << "WITHDRAW FUNDS\n" << UI::RESET;
+                UI::drawHorizontalLine(20);
+                cout << "Current balance: $" << siteBalance << "\n";
+                
+                string amountStr = getInput("Enter amount to withdraw: ", [](const string& s) {
+                    try {
+                        float amt = stof(s);
+                        return amt > 0;
+                    } catch (...) {
+                        return false;
+                    }
+                }, "Invalid amount! Enter a positive number.");
+                
+                float amount = stof(amountStr);
+                
+                if (amount > siteBalance) {
+                    UI::printError("Insufficient funds!");
+                    UI::sleepMilliseconds(1500);
+                    break;
+                }
+                
+                siteBalance -= amount;
+                UI::printSuccess("Withdrawal successful! New balance: $" + to_string(siteBalance).substr(0, 6));
+                UI::sleepMilliseconds(2000);
+                break;
+            }
+            case 3: {
+                UI::clearScreen();
+                cout << UI::BOLD << "ADD FUNDS\n" << UI::RESET;
+                UI::drawHorizontalLine(20);
+                
+                string amountStr = getInput("Enter amount to deposit: ", [](const string& s) {
+                    try {
+                        float amt = stof(s);
+                        return amt > 0;
+                    } catch (...) {
+                        return false;
+                    }
+                }, "Invalid amount! Enter a positive number.");
+                
+                float amount = stof(amountStr);
+                siteBalance += amount;
+                
+                UI::printSuccess("Deposit successful! New balance: $" + to_string(siteBalance).substr(0, 6));
+                UI::sleepMilliseconds(2000);
+                break;
+            }
+            case 4: {
+                UI::clearScreen();
+                cout << UI::BOLD << "CHANGE ADMIN PASSWORD\n" << UI::RESET;
+                UI::drawHorizontalLine(30);
+                
+                ifstream in(adminFile);
+                string currentPassword;
+                in >> currentPassword;
+                in.close();
+                
+                string entered = getInput("Enter current password: ");
+                if (entered != currentPassword) {
+                    UI::printError("Incorrect password!");
+                    UI::sleepMilliseconds(1500);
+                    break;
+                }
+                
+                string newPass = getInput("Enter new password: ", [](const string& s) {
+                    return s.length() >= 6 && containsAlphabet(s) && containsDigits(s);
+                }, "Password must be at least 6 characters with both letters and numbers!");
+                
+                ofstream out(adminFile);
+                out << newPass;
+                out.close();
+                
+                UI::printSuccess("Password changed successfully!");
+                UI::sleepMilliseconds(1500);
+                break;
+            }
+            case 5: {
+                UI::clearScreen();
+                cout << UI::BOLD << "ALL ORDERS\n" << UI::RESET;
+                
+                vector<Order> orders;
+                while (!orderQueue.empty()) {
+                    orders.push_back(orderQueue.top());
+                    orderQueue.pop();
+                }
+                
+                cout << "+----------------------+---------+---------+--------------+" << endl;
+                cout << "| " << left << setw(20) << "Customer" << "| " 
+                     << setw(7) << "Product" << "| " 
+                     << setw(7) << "Quantity" << "| " 
+                     << setw(12) << "Status" << "|" << endl;
+                
+                for (const Order& order : orders) {
+                    cout << "+----------------------+---------+---------+--------------+" << endl;
+                    cout << "| " << setw(20) << order.username << "| " 
+                         << setw(7) << order.productName << "| " 
+                         << setw(7) << order.quantity << "| " 
+                         << setw(12) << order.status << "|" << endl;
+                    orderQueue.push(order);
+                }
+                
+                cout << "+----------------------+---------+---------+--------------+" << endl;
+                cout << "Press Enter to continue...";
+                cin.ignore();
+                cin.get();
+                break;
+            }
+            case 6: {
+                UI::clearScreen();
+                cout << UI::BOLD << "MARK ORDER AS DELIVERED\n" << UI::RESET;
+                
+                vector<Order> pendingOrders;
+                vector<Order> allOrders;
+                
+                while (!orderQueue.empty()) {
+                    Order order = orderQueue.top();
+                    if (string(order.status) == "Pending") {
+                        pendingOrders.push_back(order);
+                    }
+                    allOrders.push_back(order);
+                    orderQueue.pop();
+                }
+                
+                if (pendingOrders.empty()) {
+                    UI::printWarning("No pending orders!");
+                    UI::sleepMilliseconds(1500);
+                    // Restore queue
+                    for (const Order& order : allOrders) {
+                        orderQueue.push(order);
+                    }
+                    break;
+                }
+                
+                cout << "+----------------------+---------+---------+--------------+" << endl;
+                cout << "| " << left << setw(20) << "Customer" << "| " 
+                     << setw(7) << "Product" << "| " 
+                     << setw(7) << "Quantity" << "| " 
+                     << setw(12) << "Amount" << "|" << endl;
+                
+                for (const Order& order : pendingOrders) {
+                    cout << "+----------------------+---------+---------+--------------+" << endl;
+                    cout << "| " << setw(20) << order.username << "| " 
+                         << setw(7) << order.productName << "| " 
+                         << setw(7) << order.quantity << "| " 
+                         << setw(12) << "$" + to_string(order.totalAmount).substr(0, 6) << "|" << endl;
+                }
+                
+                cout << "+----------------------+---------+---------+--------------+" << endl;
+                cout << endl;
+                
+                string username = getInput("Enter customer username to mark as delivered: ");
+                
+                bool found = false;
+                for (Order& order : allOrders) {
+                    if (string(order.username) == username && string(order.status) == "Pending") {
+                        strcpy(order.status, "Delivered");
+                        siteBalance += order.totalAmount;
+                        found = true;
+                    }
+                    orderQueue.push(order);
+                }
+                
+                if (found) {
+                    saveOrders();
+                    UI::printSuccess("Order marked as delivered!");
+                } else {
+                    UI::printError("No pending orders found for that username!");
+                }
+                UI::sleepMilliseconds(1500);
+                break;
+            }
+            case 7: {
+                addProduct();
+                break;
+            }
+            case 8: {
+                UI::printInfo("Logging out...");
+                UI::sleepMilliseconds(1000);
+                break;
+            }
+            default: {
+                UI::printError("Invalid choice!");
+                UI::sleepMilliseconds(1000);
+            }
         }
-    } while (choice != 7);
+    } while (choice != 8);
+}
+
+void userMenu(const string& username) {
+    int choice;
+    do {
+        UI::clearScreen();
+        vector<string> options = {
+            "View Products",
+            "Add to Cart",
+            "View Cart",
+            "Checkout",
+            "View Order History",
+            "Logout"
+        };
+        displayMenu(options, "USER MENU - " + username);
+        
+        cin >> choice;
+        cin.ignore();
+        
+        switch (choice) {
+            case 1: {
+                displayProductTable();
+                cout << "Press Enter to continue...";
+                cin.ignore();
+                cin.get();
+                break;
+            }
+            case 2: {
+                addToCart(username);
+                break;
+            }
+            case 3: {
+                displayCart();
+                cout << "Press Enter to continue...";
+                cin.ignore();
+                cin.get();
+                break;
+            }
+            case 4: {
+                checkout(username);
+                break;
+            }
+            case 5: {
+                viewOrderHistory(username);
+                break;
+            }
+            case 6: {
+                UI::printInfo("Logging out...");
+                UI::sleepMilliseconds(1000);
+                break;
+            }
+            default: {
+                UI::printError("Invalid choice!");
+                UI::sleepMilliseconds(1000);
+            }
+        }
+    } while (choice != 6);
 }
